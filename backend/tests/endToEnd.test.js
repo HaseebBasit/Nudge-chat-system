@@ -1,3 +1,4 @@
+process.env.NODE_ENV = 'test';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import { io as ClientIO } from 'socket.io-client';

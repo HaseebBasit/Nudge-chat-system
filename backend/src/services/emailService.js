@@ -2,26 +2,46 @@ import nodemailer from 'nodemailer';
 
 let transporter = null;
 
-const getTransporter = () => {
-  if (transporter) return transporter;
+export const getTransporter = () => {
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_SERVICE, NODE_ENV } = process.env;
 
-  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+  // If real SMTP credentials are provided, configure real transporter
+  if (SMTP_USER && SMTP_PASS) {
+    if (transporter) return transporter;
 
-  if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
-    transporter = nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: Number(SMTP_PORT) || 587,
-      secure: Number(SMTP_PORT) === 465,
-      auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASS
-      }
-    });
-  } else {
-    // Development fallback transporter - prints to console
-    transporter = {
+    // Use Gmail service preset if host or service specifies gmail
+    if (SMTP_SERVICE === 'gmail' || (SMTP_HOST && SMTP_HOST.toLowerCase().includes('gmail'))) {
+      transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: SMTP_USER.trim(),
+          pass: SMTP_PASS.trim().replace(/\s+/g, '') // remove spaces from 16-char app passwords
+        }
+      });
+    } else {
+      const port = Number(SMTP_PORT) || 587;
+      transporter = nodemailer.createTransport({
+        host: SMTP_HOST || 'smtp.gmail.com',
+        port,
+        secure: port === 465,
+        auth: {
+          user: SMTP_USER.trim(),
+          pass: SMTP_PASS.trim()
+        },
+        tls: {
+          rejectUnauthorized: false
+        }
+      });
+    }
+
+    return transporter;
+  }
+
+  // During automated tests or if explicitly allowed in local development without SMTP
+  if (NODE_ENV === 'test' || process.env.ALLOW_MOCK_EMAIL === 'true') {
+    return {
       sendMail: async (mailOptions) => {
-        console.log('\n================== [NUDGE CHAT EMAIL SERVICE] ==================');
+        console.log('\n================== [NUDGE CHAT TEST EMAIL LOG] ==================');
         console.log(`To: ${mailOptions.to}`);
         console.log(`Subject: ${mailOptions.subject}`);
         console.log(`Body:\n${mailOptions.text || mailOptions.html}`);
@@ -31,11 +51,20 @@ const getTransporter = () => {
     };
   }
 
-  return transporter;
+  return null;
 };
 
 export const sendOtpEmail = async (email, otp, purpose) => {
   const currentTransporter = getTransporter();
+
+  // If no SMTP credentials are configured and not in test mode, alert clearly
+  if (!currentTransporter) {
+    const errorMsg =
+      `Real email delivery requires SMTP credentials! Please set SMTP_USER and SMTP_PASS in backend/.env (e.g. Gmail address & 16-character App Password).`;
+    console.error(`\n❌ [EMAIL NOT SENT] ${errorMsg}`);
+    console.log(`[TERMINAL OTP BACKUP for ${email}]: ${otp}\n`);
+    throw new Error(errorMsg);
+  }
 
   const isVerification = purpose === 'email_verification';
   const subject = isVerification 
@@ -68,11 +97,21 @@ export const sendOtpEmail = async (email, otp, purpose) => {
 
   const text = `${title}\n\n${description}\n\nYour 6-digit Code: ${otp}\n\nThis code will expire in 10 minutes.\n`;
 
-  await currentTransporter.sendMail({
-    from: process.env.EMAIL_FROM || '"Nudge Chat" <no-reply@nudgechat.com>',
-    to: email,
-    subject,
-    text,
-    html
-  });
+  const fromAddress = process.env.EMAIL_FROM || (process.env.SMTP_USER ? `"Nudge Chat" <${process.env.SMTP_USER}>` : '"Nudge Chat" <no-reply@nudgechat.com>');
+
+  try {
+    const info = await currentTransporter.sendMail({
+      from: fromAddress,
+      to: email,
+      subject,
+      text,
+      html
+    });
+
+    console.log(`\n📧 [EMAIL DISPATCHED] OTP successfully sent to user inbox: ${email} (ID: ${info.messageId || 'ok'})\n`);
+    return info;
+  } catch (err) {
+    console.error(`\n❌ [SMTP DELIVERY FAILED] Could not deliver email to ${email}:`, err.message);
+    throw new Error(`Failed to deliver OTP to ${email}: ${err.message}. Please check your SMTP settings in backend/.env.`);
+  }
 };
